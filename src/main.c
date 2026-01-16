@@ -14,6 +14,11 @@
 #include "../include/constants.h"
 #include <cjson/cJSON.h>
 
+// todo:<AK> improve and clean up logging
+static bool verbose_logging = false;
+#define LOG_STDOUT(x,...) if(verbose_logging) { fprintf(stdout,x,__VA_ARGS__); }
+
+
 typedef struct {
     bool verbose;
     bool fork_process;
@@ -25,20 +30,22 @@ typedef struct {
     int hyprland_socket_fd;
     int socket_wait_time;
     int polling_period;
+    bool multi_monitor_aware;
 } config_t;
 
 void print_help(const char *program_name) {
     printf("Usage: %s [options]\n", program_name);
     printf("Options:\n");
-    printf("  -v, --verbose          Enables verbose output\n");
-    printf("  -f, --fork             Forks the process\n");
-    printf("  -p, --socket-path PATH Path to the mpvpaper socket (default: /tmp/mpvsocket)\n");
-    printf("  -w, --socket-wait-time TIME Wait time for the socket in milliseconds (default: 5000)\n");
-    printf("  -t, --period TIME      Polling period in milliseconds (default: 1000)\n");
-    printf("  -c <color_backend>     Chooses color backend (pywal or matugen)\n");
-    printf("  --pywal	         Runs pywal on pause\n");
-    printf("  --matugen              Runs matugen on pause\n");
-    printf("  -h, --help             Shows this help message\n");
+    printf("  -v, --verbose                 Enables verbose output\n");
+    printf("  -f, --fork                    Forks the process\n");
+    printf("  -p, --socket-path PATH        Path to the mpvpaper socket (default: /tmp/mpvsocket)\n");
+    printf("  -w, --socket-wait-time TIME   Wait time for the socket in milliseconds (default: 5000)\n");
+    printf("  -m --multi-monitor-aware      Enables Multi Monitor mode. If any active workspace has no windows open, enable playback.\n");
+    printf("  -t, --period TIME             Polling period in milliseconds (default: 1000)\n");
+    printf("  -c <color_backend>            Chooses color backend (pywal or matugen)\n");
+    printf("  --pywal                       Runs pywal on pause\n");
+    printf("  --matugen                     Runs matugen on pause\n");
+    printf("  -h, --help                    Shows this help message\n");
 }
 
 void log_verbose(const char* message, const config_t* config) {
@@ -87,6 +94,8 @@ void init_config(config_t* config) {
     config->hyprland_socket_fd = -1;
     config->socket_wait_time = DEFAULT_MPVPAPER_SOCKET_WAIT_TIME;
     config->polling_period = DEFAULT_PERIOD;
+    config->multi_monitor_aware = false;
+ 
 }
 
 void wait_for_socket(const char *socket_path, const config_t* config) {
@@ -140,7 +149,7 @@ char* send_to_socket(const char* command, int* socket_fd, const char* socket_pat
         *socket_fd = initialize_socket(socket_path);
     }
 
-    char buffer [4096] = {0};
+    char buffer [SIZE_16KB] = {0};
     char* response = NULL;
 
     if (write(*socket_fd, command, strlen(command)) < 0) {
@@ -189,6 +198,108 @@ int query_windows(config_t* config) {
 
     return windows;
 }
+
+// todo:<AK> cleanup and split up big function into logical chunks
+// -> "get all active workspaces on all monitors"
+// -> "get amount of active windows on active monitors"
+// -> "get lowest int"
+int query_monitor_data(config_t* config) {
+    char* json_str = send_to_hyprland_socket(QUERY_HYPRLAND_SOCKET_MONITORS_DATA, config);
+    if (!json_str) {
+        fprintf(stderr, "error: failed to query monitors data\n %s\n", json_str);
+        return -1;
+    }
+
+    cJSON* json = cJSON_Parse(json_str);
+  
+    if (!json) {
+        fprintf(stderr, "error: failed to parse JSON\n %s\n", json_str);
+        return -1;
+    }
+      free(json_str);
+
+    int monitor_count = cJSON_GetArraySize(json);
+    LOG_STDOUT("Found %d monitors.\n", monitor_count );
+
+    int arr_active_workspace_ids[monitor_count];
+
+    // Collect the workspaces that are active on each monitor and save them into an array
+    for (int i = 0; i < monitor_count; i++){
+        cJSON* monitor = cJSON_GetArrayItem(json, i);
+        if(!monitor){
+            fprintf(stderr, "error: failed to get monitor at index %d", i);
+            return -1;
+        }
+        cJSON* active_ws = cJSON_GetObjectItemCaseSensitive(monitor,"activeWorkspace");
+        if(!active_ws){
+            fprintf(stderr, "error: failed to get activeWorkspace at monitor index %d", i);
+            return -1;
+        }
+        cJSON* json_active_ws_id = cJSON_GetObjectItemCaseSensitive(active_ws,"id");
+        int active_ws_id = cJSON_IsNumber(json_active_ws_id) ? json_active_ws_id->valueint : -1;
+        arr_active_workspace_ids[i] = active_ws_id;
+    }
+
+    // We dont need the data anymore, we can reuse the space
+    cJSON_Delete(json);
+
+    // get amount of windows on each active workspace
+    json_str = send_to_hyprland_socket(QUERY_HYPRLAND_SOCKET_WORKSPACES_DATA, config);
+    if (!json_str) {
+        fprintf(stderr, "error: failed to query workspaces data\n");
+        return -1;
+    }
+
+    json = cJSON_Parse(json_str);
+    free(json_str);
+
+     if (!json) {
+        fprintf(stderr, "error: failed to parse JSON\n");
+        return -1;
+    }
+
+    int ws_count = cJSON_GetArraySize(json);
+    LOG_STDOUT("Found %d workspaces.\n", ws_count );
+
+    int arr_active_windows_on_monitors[monitor_count];
+
+    // for each workspace that we determined as active, go through the workspaces and
+    // read how many windows are active on it and write it back
+     for (int i = 0; i < monitor_count; i++){
+        int cur_monitor_ws = arr_active_workspace_ids[i];
+        
+        for(int j = 0; j < ws_count; j++){
+            cJSON* ws_json = cJSON_GetArrayItem(json,j);
+            if(!ws_json){
+                fprintf(stderr, "error: failed to get workspace at idx %d\n",j);
+                return -1;
+            }
+            cJSON* js_ws_id = cJSON_GetObjectItemCaseSensitive(ws_json,"id");
+            int ws_id = cJSON_IsNumber(js_ws_id) ? js_ws_id->valueint : -1;
+
+            if(ws_id == cur_monitor_ws){
+                cJSON* js_win_count = cJSON_GetObjectItemCaseSensitive(ws_json,"windows");
+                int win_count = cJSON_IsNumber(js_win_count) ? js_win_count->valueint : 0;
+                arr_active_windows_on_monitors[i] = win_count;
+                LOG_STDOUT( "Found %d active windows on active workspace %d\n",win_count,cur_monitor_ws);
+                break; // we can break out and go on to the next monitor
+            }
+        }
+     }
+
+     // free json data again
+    cJSON_Delete(json);
+
+    int min_windows = 1000;
+    for (int i = 0; i < monitor_count; i++){
+        if (arr_active_windows_on_monitors[i] < min_windows){
+            min_windows = arr_active_windows_on_monitors[i];
+        }
+    }
+    LOG_STDOUT("Minimum amount of windows on any active workspace: %d\n", min_windows);
+    return min_windows;
+}
+
 
 bool query_pause_status(config_t* config) {
     char* json_str = send_to_mpv_socket(QUERY_MPVPAPER_SOCKET_PAUSE_PROPERTY, config);
@@ -347,7 +458,12 @@ void update_mpv_state(config_t* config) {
 	static int last_windows = -1;
 	static bool last_paused = false;
 
-    int windows = query_windows(config);
+    int windows = 0;
+    if(config->multi_monitor_aware == true)
+        windows = query_monitor_data(config);
+    else
+        windows = query_windows(config);
+
     if (windows < 0) return;
 
     bool is_paused = query_pause_status(config);
@@ -400,6 +516,7 @@ int main(int argc, char **argv) {
         {"socket-path", required_argument, NULL, 'p'},
         {"fork", no_argument, NULL, 'f'},
         {"verbose", no_argument, NULL, 'v'},
+        {"multi-monitor-aware", no_argument, NULL, 'm'},
         {"pywal", no_argument, NULL, '_pywal'},
         {"matugen", no_argument, NULL, '_matugen'},
         {"socket-wait-time", required_argument, NULL, 'w'},
@@ -411,7 +528,7 @@ int main(int argc, char **argv) {
     config.do_pywal = false;
     config.do_matugen = false;
 
-    while ((opt = getopt_long(argc, argv, "hvfp:c:t:w:", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "hvfp:c:t:w:m", long_options, NULL)) != -1) {
         switch (opt) {
             case 'h':
                 print_help(argv[0]);
@@ -421,6 +538,7 @@ int main(int argc, char **argv) {
                 break;
             case 'v':
                 config.verbose = true;
+                verbose_logging = true;
                 break;
             case 'p':
                 config.mpvpaper_socket_path = optarg;
@@ -441,6 +559,9 @@ int main(int argc, char **argv) {
                 break;
             case '_matugen': // For --matugen
                 config.do_matugen = true;
+                break;
+            case 'm':
+                config.multi_monitor_aware = true;
                 break;
             default:
                 print_help(argv[0]);
