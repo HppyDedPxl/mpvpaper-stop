@@ -6,7 +6,9 @@ project('mpvpaper-stop', 'c',
 inc = include_directories('include')
 cjson_dep = dependency('libcjson', required: true)
 
-executable('mpvpaper-stop', 'src/main.c',
+add_global_link_arguments(language:'c')
+
+executable('mpv-stop','src/sockets.c','src/utils.c','src/context.c', 'src/logging.c', 'src/main.c', 
     dependencies: [cjson_dep],
     include_directories: inc,
     install: true
