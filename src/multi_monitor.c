@@ -12,13 +12,13 @@ monitor_config_t mon_config_fromJSON(cJSON* json){
     monitor_config_t config;
     config.socket_path = "";
 
-    cJSON* js_name = cJSON_GetObjectItemCaseSensitive(json, "name");
-    if(!js_name)
+    cJSON* js_socket = cJSON_GetObjectItemCaseSensitive(json, "mpvsocket");
+    if(!js_socket)
     {
         log_err("error: json provided to mon_config_fromJSON is invalid. Object initialization failed.");
         return config;
     }
-    config.socket_path = strdup(cJSON_GetStringValue(js_name));
+    config.socket_path = strdup(cJSON_GetStringValue(js_socket));
     return config;
 }
 
@@ -31,26 +31,34 @@ bool query_monitors(context_t* context, monitor_t* buffer, int* monitors_queried
     // find amount of monitors configured so we know how much space to allocate
     if(has_mmc){
         FILE* conf_ptr = fopen(context->multi_monitor_config_path,"r");
+
         if(conf_ptr != NULL){
-            char config_buffer[SIZE_8KB];
-            fgets(config_buffer,SIZE_8KB,conf_ptr);
+            fseek(conf_ptr,0,SEEK_END);
+            long fsize = ftell(conf_ptr);
+            fseek(conf_ptr,0,SEEK_SET);
+
+            char* config_buffer = malloc(fsize + 1);
+            fread(config_buffer,fsize,1,conf_ptr);
+            config_buffer[fsize] = 0; // make zero terminate
+
             json_monitor_conf = cJSON_Parse(config_buffer);
             cJSON* json_monitor_array = cJSON_GetObjectItemCaseSensitive(json_monitor_conf,"monitors");
             configured_monitors = cJSON_GetArraySize(json_monitor_array);
-            cJSON_free(json_monitor_conf);
+            free(config_buffer);
             fclose(conf_ptr);
         }
 
         if(context->monitor_count > -1 && context->monitor_count != configured_monitors){
             log_err("error: global provided monitor-count does not match the configured amount of monitors in the config.json. Consider not passing a global monitor count together with a json config.\n");
+            cJSON_free(json_monitor_conf);
             return false;
         }
     }
 
-    
-    char* hyprctl_mons_str = send_to_socket(QUERY_HYPRLAND_SOCKET_MONITORS_DATA, &context->hyprland_socket_fd, context->hyprland_socket_path);
+    char* hyprctl_mons_str = open_and_send_to_socket(QUERY_HYPRLAND_SOCKET_MONITORS_DATA, context->hyprland_socket_path);
     if (!hyprctl_mons_str) {
         log_err("error: failed to query monitors data\n %s\n", hyprctl_mons_str);
+        cJSON_free(json_monitor_conf);
         return false;
     }
 
@@ -58,7 +66,8 @@ bool query_monitors(context_t* context, monitor_t* buffer, int* monitors_queried
   
     if (!json_hyprctl_mons) {
         log_err("error: failed to parse JSON\n %s\n", hyprctl_mons_str);
-        return -1;
+        cJSON_free(json_monitor_conf);
+        return false;
     }
 
     free(hyprctl_mons_str);
@@ -87,6 +96,7 @@ bool query_monitors(context_t* context, monitor_t* buffer, int* monitors_queried
         cJSON* monitor = cJSON_GetArrayItem(json_hyprctl_mons, i);
         if(!monitor){
             log_err("error: failed to get monitor at index %d", i);
+            cJSON_free(json_monitor_conf);
             return false;
         }
 
@@ -105,6 +115,7 @@ bool query_monitors(context_t* context, monitor_t* buffer, int* monitors_queried
         cJSON* active_ws = cJSON_GetObjectItemCaseSensitive(monitor,"activeWorkspace");
         if(!active_ws){
             log_err("error: failed to get activeWorkspace at monitor index %d", i);
+            cJSON_free(json_monitor_conf);
             return false;
         }
         // Get the active workspace id
@@ -118,7 +129,7 @@ bool query_monitors(context_t* context, monitor_t* buffer, int* monitors_queried
         if(has_mmc && json_monitor_conf != NULL){  
             cJSON* json_monitor_array = cJSON_GetObjectItemCaseSensitive(json_monitor_conf,"monitors");
             for(size_t j = 0; j < configured_monitors; j++){
-                cJSON* json_monitor = cJSON_GetArrayItem(json_monitor_array, i);
+                cJSON* json_monitor = cJSON_GetArrayItem(json_monitor_array, j);
                 char* monitor_name = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json_monitor,"name"));
                 // find the correct config for this monitor
                 if(strcmp(monitor_name,buffer[i].name) == 0){
@@ -135,12 +146,13 @@ bool query_monitors(context_t* context, monitor_t* buffer, int* monitors_queried
 
     // We don't need the data anymore, we can reuse the space
     cJSON_Delete(json_hyprctl_mons);
+    cJSON_free(json_monitor_conf);
     return true;
 }
 
 bool query_workspaces_from_monitors(context_t* context, monitor_t* monitors, int monitor_count, workspace_t* buffer) {
     // get amount of windows on each active workspace
-    char* json_str = send_to_socket(QUERY_HYPRLAND_SOCKET_WORKSPACES_DATA, &context->hyprland_socket_fd, context->hyprland_socket_path);
+    char* json_str = open_and_send_to_socket(QUERY_HYPRLAND_SOCKET_WORKSPACES_DATA, context->hyprland_socket_path);
 
     if (!json_str) {
         log_err("error: failed to query workspaces data\n");

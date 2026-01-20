@@ -1,4 +1,7 @@
 #include "../include/utils.h"
+
+#include <cJSON.h>
+
 #include "../include/constants.h"
 
 #include <stdio.h>
@@ -8,6 +11,10 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#include "context.h"
+#include "logging.h"
+#include "sockets.h"
 
 void create_temp_dir() {
 	if (mkdir(TEMP_DIR, 0755) == -1) {
@@ -47,4 +54,41 @@ char* get_hyprctl_socket_path() {
     }
 
     return strdup(path);
+}
+
+void resume_mpv_on_socket(context_t* context, const char* socket_path) {
+    log_out("Resuming socket: %s",socket_path);
+    char* response = open_and_send_to_socket(SET_MPVPAPER_SOCKET_RESUME, socket_path);
+
+    if (response) free(response);
+}
+
+void pause_mpv_on_socket(context_t* context, const char* socket_path) {
+    log_out("Pausing");
+    char* response = open_and_send_to_socket(SET_MPVPAPER_SOCKET_PAUSE, socket_path);
+    if (response) free(response);
+}
+
+bool mpv_socket_is_paused(context_t* context, const char* socket_path) {
+    char* json_str = open_and_send_to_socket(QUERY_MPVPAPER_SOCKET_PAUSE_PROPERTY, socket_path);
+
+    if (!json_str) {
+        log_out("error: failed to query pause status\n");
+        return false;
+    }
+
+    cJSON* json = cJSON_Parse(json_str);
+    free(json_str);
+
+    if (!json) {
+        log_err("error: failed to parse JSON\n");
+        return false;
+    }
+
+    cJSON* json_data = cJSON_GetObjectItemCaseSensitive(json, "data");
+    bool paused = cJSON_IsBool(json_data) ? cJSON_IsTrue(json_data) : false;
+
+    cJSON_Delete(json);
+
+    return paused;
 }
