@@ -14,6 +14,8 @@ typedef struct {
     int polling_period;
     bool multi_monitor_aware;
     bool retry_on_socket_error;
+    int monitor_count;
+    char* multi_monitor_config_path;
 } context_t;
 
 void init_context(context_t* config);

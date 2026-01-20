@@ -1,0 +1,18 @@
+{
+    "monitors" : 
+    [
+        {
+            "name":"HDMI-1",
+            "mpvsocket":"/tmp/mpv-socket-HDMI-1"
+        },
+        {
+            "name":"DP-1",
+            "mpvsocket":"/tmp/mpv-socket-DP-1"
+        }
+        ,
+        {
+            "name":"DP-2",
+            "mpvsocket":"/tmp/mpv-socket-DP-2"
+        }
+    ]
+}

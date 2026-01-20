@@ -3,7 +3,7 @@
 
 #define DEFAULT_PERIOD 1000
 #define DEFAULT_MPVPAPER_SOCKET_PATH "/tmp/mpvsocket"
-#define DEFAULT_MPVPAPER_SOCKET_WAIT_TIME 5000
+#define DEFAULT_MPVPAPER_SOCKET_WAIT_TIME 0
 #define TEMP_DIR "/tmp/mpvpaper-stop"
 
 #define QUERY_HYPRLAND_SOCKET_ACTIVE_WORKSPACE "j/activeworkspace"

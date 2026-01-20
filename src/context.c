@@ -13,5 +13,7 @@ void init_context(context_t* context) {
     context->polling_period = DEFAULT_PERIOD;
     context->multi_monitor_aware = false;
     context->retry_on_socket_error = false;
+    context->monitor_count = 1;
+    context->multi_monitor_config_path = "";
  
 }

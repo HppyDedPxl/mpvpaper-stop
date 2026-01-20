@@ -46,12 +46,11 @@ int initialize_socket(const char* socket_path) {
 }
 
 
-char* send_to_socket(const char* command, int* socket_fd, const char* socket_path, const bool reconnect) {
+char* send_to_socket(const char* command, int* socket_fd, const char* socket_path) {
 
-    if (reconnect) {
-        close(*socket_fd);
-        *socket_fd = initialize_socket(socket_path);
-    }
+    close(*socket_fd);
+    *socket_fd = initialize_socket(socket_path);
+    
     char buffer [SIZE_16KB] = {0};
     char* response = NULL;
 

@@ -31,9 +31,8 @@ void set_perror(const char *message, ...){
     va_list args;
     va_start(args,message);
 
-    char formatted_message[SIZE_8KB];;
-    snprintf(formatted_message, sizeof(formatted_message), message, args);
-    log_err(formatted_message);
+    char formatted_message[SIZE_8KB];
+    vsnprintf(formatted_message, sizeof(formatted_message), message, args);
     perror(formatted_message);
     va_end(args);
 

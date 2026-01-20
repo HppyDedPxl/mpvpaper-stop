@@ -14,6 +14,7 @@
 #include "../include/sockets.h"
 #include "../include/context.h"
 #include "../include/logging.h"
+#include "../include/multi_monitor.h"
 
 #include <cjson/cJSON.h>
 
@@ -27,6 +28,8 @@ void print_help(const char *program_name) {
     printf("  -m --multi-monitor-aware      Enables Multi Monitor mode. If any active workspace has no windows open, enable playback.\n");
     printf("  -t, --period TIME             Polling period in milliseconds (default: 1000)\n");
     printf("  -h, --help                    Shows this help message\n");
+    printf("  -n, --multi-monitor-count     Sets the amount of monitors to be queried in multi monitor mode.\n");
+    printf("  -j, --multi-monitor-config    Sets the path to the multi-monitor-config.json (overwrites multi-monitor-count).\n");
 }
 
 void wait_for_socket(const char *socket_path, const context_t* context) {
@@ -34,18 +37,10 @@ void wait_for_socket(const char *socket_path, const context_t* context) {
     while (elapsed < context->socket_wait_time * 1000) {
         const int interval = 100000;
         if (access(socket_path, F_OK) == 0) {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "Socket %s is available", socket_path);
-            log_out(msg);
-
+            log_out("Socket %s is available\n", socket_path);
             return;
         }
-
-        char msg[256];
-        snprintf(msg, sizeof(msg), "Socket %s not available, sleeping...", socket_path);
-        log_out(msg);
-
-
+        log_out("Socket %s not available, sleeping...\n", socket_path);
         usleep(interval);
         elapsed += interval;
     }
@@ -55,11 +50,11 @@ void wait_for_socket(const char *socket_path, const context_t* context) {
 }
 
 char* send_to_mpv_socket(const char* command, context_t* context) {
-    return send_to_socket(command, &context->mpvpaper_socket_fd, context->mpvpaper_socket_path, false);
+    return send_to_socket(command, &context->mpvpaper_socket_fd, context->mpvpaper_socket_path);
 }
 
 char* send_to_hyprland_socket(const char* command, context_t* context) {
-    return send_to_socket(command, &context->hyprland_socket_fd, context->hyprland_socket_path, true);
+    return send_to_socket(command, &context->hyprland_socket_fd, context->hyprland_socket_path);
 }
 
 int query_windows(context_t* context) {
@@ -85,105 +80,34 @@ int query_windows(context_t* context) {
     return windows;
 }
 
-// todo:<AK> cleanup and split up big function into logical chunks
-// -> "get all active workspaces on all monitors"
-// -> "get amount of active windows on active monitors"
-// -> "get lowest int"
-int query_monitor_data(context_t* context) {
-    char* json_str = send_to_hyprland_socket(QUERY_HYPRLAND_SOCKET_MONITORS_DATA, context);
-    if (!json_str) {
-        log_err("error: failed to query monitors data\n %s\n", json_str);
-        return -1;
-    }
+int mode_multi_monitor_no_config(context_t* context) {
 
-    cJSON* json = cJSON_Parse(json_str);
-  
-    if (!json) {
-        log_err("error: failed to parse JSON\n %s\n", json_str);
-        return -1;
-    }
-      free(json_str);
+    monitor_t* mon_buffer = calloc( 32,sizeof(monitor_t)); // Potentially a bit overkill but makes sure up to 32 monitors are supported.
+    workspace_t** ptr_ws_buffer = calloc(1,sizeof(workspace_t*));
+    int* monitors_queried = calloc(1,sizeof(int*));
+    int result = -1;
 
-    int monitor_count = cJSON_GetArraySize(json);
-    log_out("Found %d monitors.\n", monitor_count );
+    query_monitors_and_workspaces(context,mon_buffer,monitors_queried,ptr_ws_buffer);
 
-    int arr_active_workspace_ids[monitor_count];
-
-    // Collect the workspaces that are active on each monitor and save them into an array
-    for (int i = 0; i < monitor_count; i++){
-        cJSON* monitor = cJSON_GetArrayItem(json, i);
-        if(!monitor){
-            log_err("error: failed to get monitor at index %d", i);
-            return -1;
-        }
-        cJSON* active_ws = cJSON_GetObjectItemCaseSensitive(monitor,"activeWorkspace");
-        if(!active_ws){
-            log_err("error: failed to get activeWorkspace at monitor index %d", i);
-            return -1;
-        }
-        cJSON* json_active_ws_id = cJSON_GetObjectItemCaseSensitive(active_ws,"id");
-        int active_ws_id = cJSON_IsNumber(json_active_ws_id) ? json_active_ws_id->valueint : -1;
-        arr_active_workspace_ids[i] = active_ws_id;
-    }
-
-    // We dont need the data anymore, we can reuse the space
-    cJSON_Delete(json);
-
-    // get amount of windows on each active workspace
-    json_str = send_to_hyprland_socket(QUERY_HYPRLAND_SOCKET_WORKSPACES_DATA, context);
-    if (!json_str) {
-        log_err("error: failed to query workspaces data\n");
-        return -1;
-    }
-
-    json = cJSON_Parse(json_str);
-    free(json_str);
-
-     if (!json) {
-        log_err("error: failed to parse JSON\n");
-        return -1;
-    }
-
-    int ws_count = cJSON_GetArraySize(json);
-    log_out("Found %d workspaces.\n", ws_count );
-
-    int arr_active_windows_on_monitors[monitor_count];
-
-    // for each workspace that we determined as active, go through the workspaces and
-    // read how many windows are active on it and write it back
-     for (int i = 0; i < monitor_count; i++){
-        int cur_monitor_ws = arr_active_workspace_ids[i];
-        
-        for(int j = 0; j < ws_count; j++){
-            cJSON* ws_json = cJSON_GetArrayItem(json,j);
-            if(!ws_json){
-                log_err("error: failed to get workspace at idx %d\n",j);
-                return -1;
-            }
-            cJSON* js_ws_id = cJSON_GetObjectItemCaseSensitive(ws_json,"id");
-            int ws_id = cJSON_IsNumber(js_ws_id) ? js_ws_id->valueint : -1;
-
-            if(ws_id == cur_monitor_ws){
-                cJSON* js_win_count = cJSON_GetObjectItemCaseSensitive(ws_json,"windows");
-                int win_count = cJSON_IsNumber(js_win_count) ? js_win_count->valueint : 0;
-                arr_active_windows_on_monitors[i] = win_count;
-                log_out( "Found %d active windows on active workspace %d\n",win_count,cur_monitor_ws);
-                break; // we can break out and go on to the next monitor
-            }
-        }
-     }
-
-     // free json data again
-    cJSON_Delete(json);
-
-    int min_windows = 1000;
-    for (int i = 0; i < monitor_count; i++){
-        if (arr_active_windows_on_monitors[i] < min_windows){
-            min_windows = arr_active_windows_on_monitors[i];
+    // Actual comparison operation todo: this could be an outside lambda call that takes in mon_buffer and ws_buffer
+    for (int i = 0; i < (*monitors_queried); ++i) {
+        if (result == -1 || (*ptr_ws_buffer)[i].windows < result) {
+            result = (*ptr_ws_buffer)[i].windows;
         }
     }
-    log_out("Minimum amount of windows on any active workspace: %d\n", min_windows);
-    return min_windows;
+
+    // Cleanup allocations
+    for (int i = 0; i < *monitors_queried; ++i) {
+        if (mon_buffer != NULL)
+            free(mon_buffer[i].name);
+        if ((*ptr_ws_buffer) != NULL)
+            free((*ptr_ws_buffer)[i].monitor_name);
+    }
+    free(*ptr_ws_buffer);
+    free(ptr_ws_buffer);
+    free(mon_buffer);
+    free(monitors_queried);
+    return result;
 }
 
 
@@ -230,8 +154,10 @@ void update_mpv_state(context_t* context) {
 	static bool last_paused = false;
     int windows = 0;
 
-    if(context->multi_monitor_aware == true)
-        windows = query_monitor_data(context);
+    log_out("0");
+    if(context->multi_monitor_aware == true){
+         windows = mode_multi_monitor_no_config(context);
+    }
     else
         windows = query_windows(context);
 
@@ -244,9 +170,7 @@ void update_mpv_state(context_t* context) {
 	last_windows = windows;
 	last_paused = is_paused;
 
-    char message[64];
-    snprintf(message, sizeof(message), "{windows: %d, paused: %d}", windows, is_paused);
-    log_out(message);
+    log_out("{windows: %d, paused: %d}",windows,is_paused);
 
     if (windows == 0 && is_paused) {
         resume_mpv(context);
@@ -261,25 +185,24 @@ void fork_if(const bool flag) {
 
     int pid = fork();
     if (pid < 0) {
-        perror("error: fork failed");
+        set_perror("error: fork failed");
         exit(EXIT_FAILURE);
     }
 
     if (pid > 0) exit(EXIT_SUCCESS);
 
     if (setsid() < 0) {
-        perror("error: setsid failed");
+        set_perror("error: setsid failed");
         exit(EXIT_FAILURE);
     }
 }
 
 void validate_period(int period) {
     if (period <= 0) {
-        log_err("error: period must be greater than 0\n");
+        set_perror("error: period must be greater than 0\n");
         exit(EXIT_FAILURE);
     }
 }
-
 
 int main(int argc, char **argv) {
     int opt;
@@ -292,13 +215,16 @@ int main(int argc, char **argv) {
         {"socket-path", required_argument, NULL, 'p'},
         {"period", required_argument, NULL, 't'},
         {"socket-wait-time", required_argument, NULL, 'w'},
+        {"multi-monitor-count", required_argument, NULL, 'n'},
+        {"multi-monitor-config", required_argument, NULL, 'j'},
         {0, 0, 0, 0}
     };
 
     context_t context;
     init_context(&context);
 
-    while ((opt = getopt_long(argc, argv, "hvfmrp:t:w:", long_options, NULL)) != -1) {
+
+    while ((opt = getopt_long(argc, argv, "hvfrmp:t:w:n:j:", long_options, NULL)) != -1) {
         switch (opt) {
             case 'h':
                 print_help(argv[0]);
@@ -325,6 +251,12 @@ int main(int argc, char **argv) {
             case 'r':
                 context.retry_on_socket_error = true;
                 break;
+            case 'n':
+                context.monitor_count = atoi(optarg);
+                break;
+            case 'j':
+                context.multi_monitor_config_path = optarg;
+                break;
             default:
                 print_help(argv[0]);
                 exit(EXIT_SUCCESS);
@@ -332,11 +264,13 @@ int main(int argc, char **argv) {
     }
 
     validate_period(context.polling_period);
-    wait_for_socket(context.mpvpaper_socket_path, &context);
+
+    if(context.socket_wait_time > 0){
+        wait_for_socket(context.mpvpaper_socket_path, &context);
+    }
+
     fork_if(context.fork_process);
 
-
-    log_out("Starting monitoring loop");
     bool sockets_connected = false;
     while (1) {
         // Initialize Sockets for this run (We do not keep sockets connected because if either Hyprland or Mpvpaper crash/close it will kill our process too.)
